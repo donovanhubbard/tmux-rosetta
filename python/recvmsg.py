@@ -215,7 +215,8 @@ def parse_event(event):
 
 def print_imsg(imsg):
     print(f"imsg= type: {imsg.header.type} len: {imsg.header.len} peerid: {imsg.header.peerid} pid: {imsg.header.pid}")
-    #print("payload: " + bytearray(imsg.payload).decode("UTF-8"))
+    if imsg.header.type  == ImsgType.MSG_IDENTIFY_TERMINFO:
+        print("payload: " + bytearray(imsg.payload).decode("UTF-8"))
 
 
 b["events"].open_perf_buffer(process_event)
