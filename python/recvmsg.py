@@ -4,9 +4,18 @@ from __future__ import print_function
 from bcc import BPF
 import argparse
 import sys
+from imsg import Imsg
+from imsg import ImsgHeader
+from imsg import ImsgType
 
-MAX_MSG_SIZE = 4096
+
+# MAX_MSG_SIZE = 65535
+# MAX_MSG_SIZE =  4096
+# MAX_MSG_SIZE =  8192
+MAX_MSG_SIZE =  16384
 MAX_IOVEC    = 8
+
+
 
 parser = argparse.ArgumentParser(description="Trace recvmsg syscalls")
 parser.add_argument("-p", "--pid",    type=int, default=0,            help="trace this PID only")
@@ -109,17 +118,107 @@ b.attach_kretprobe(event=b.get_syscall_fnname("recvmsg"), fn_name="trace_exit")
 
 outfile = open(args.output, "wb")
 
-def print_event(cpu, raw_data, size):
+current_imsg = None
+buffer = []
+count = 0
+
+def process_event(cpu, raw_data, size):
     event = b["events"].event(raw_data)
     print("pid=%-6d comm=%-16s fd=%d" % (
         event.pid,
         event.comm.decode("utf-8", "replace"),
         event.fd,
     ))
+
+    parse_event(event)
     outfile.write(bytes(event.data[:event.data_len]))
     outfile.flush()
 
-b["events"].open_perf_buffer(print_event)
+def print_debug(msg):
+    global count
+
+    if count > 500:
+        print(msg)
+
+def parse_event(event):
+    print("Starting parse event")
+    global current_imsg
+    global buffer
+    global count
+    raw_data = bytes(event.data[:event.data_len])
+    print("buffer length:" + str(len(buffer)))
+
+    if current_imsg == None:
+        print("current_imsg is None")
+    else:
+        print("current_imsg is not None")
+
+    for byte in raw_data:
+        buffer.append(byte)
+        print_debug(hex(byte))
+        print_debug("buffer len: "+ str(len(buffer)))
+        if current_imsg == None:
+            current_imsg = Imsg()
+            current_imsg.pid = event.pid
+            current_imsg.comm = event.comm
+            current_imsg.fd = event.fd
+
+        if current_imsg.header.type == None:
+            if len(buffer) < 4:
+                continue
+            else:
+                type_int = int.from_bytes(buffer, byteorder="little")
+                if type_int == 0: # we've reached the end of the buffer and there is no more data
+                    break
+                current_imsg.header.type = ImsgType(type_int)
+                buffer = []
+                print_debug("Set type:" + str(current_imsg.header.type))
+                continue
+        if current_imsg.header.len == None:
+            if len(buffer) < 4:
+                continue
+            else:
+                current_imsg.header.len = int.from_bytes(buffer, byteorder="little")
+                buffer = []
+                print_debug("length " + str(current_imsg.header.len))
+                continue
+        if current_imsg.header.peerid == None:
+            if len(buffer) < 4:
+                continue
+            else:
+                current_imsg.header.peerid = int.from_bytes(buffer, byteorder="little")
+                buffer = []
+                print_debug("peerid:" + str(current_imsg.header.peerid))
+                continue
+        if current_imsg.header.pid == None:
+            if len(buffer) < 4:
+                continue
+            else:
+                current_imsg.header.pid = int.from_bytes(buffer, byteorder="little")
+                buffer = []
+                print_debug("pid: " + str(current_imsg.header.pid))
+                continue
+        if len(buffer) < current_imsg.header.len - ImsgHeader.HEADER_LENGTH:
+            continue
+        else:
+            current_imsg.payload = buffer
+            buffer = []
+            print_imsg(current_imsg)
+            current_imsg = None
+            count += 1
+
+    print(f"We've found the last imsg: #{count}")
+    current_imsg = None
+    count = 0
+    buffer = []
+    print("Done with event")
+
+def print_imsg(imsg):
+    print(f"imsg= type: {imsg.header.type} len: {imsg.header.len} peerid: {imsg.header.peerid} pid: {imsg.header.pid}")
+    #print("payload: " + bytearray(imsg.payload).decode("UTF-8"))
+
+
+b["events"].open_perf_buffer(process_event)
 print("Tracing recvmsg, writing iovec data to %s... Ctrl-C to stop." % args.output, file=sys.stderr)
 try:
     while True:
